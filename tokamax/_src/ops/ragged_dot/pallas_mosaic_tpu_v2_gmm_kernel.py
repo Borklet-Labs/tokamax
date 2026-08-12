@@ -1011,14 +1011,44 @@ def calculate_tiling(
   lhs_bits = jax.dtypes.itemsize_bits(lhs_dtype)
   rhs_bits = jax.dtypes.itemsize_bits(rhs_dtype)
 
-  # When using bf16 for lhs and rhs, 128 is the largest tile_m value that is
-  # safe to use for most scenarios. But if lower bitwidth is used, we need
-  # to tweak tile_m to account for using faster hardware unit.
-  # TODO: Account for different TPU hardware specs.
-  bf16_bf16_tile_m = 128
+  # tile_m's target is the MXU's row granularity, READ FROM THE HARDWARE rather than hardcoded.
+  # This is the "# TODO: Account for different TPU hardware specs." that used to sit here,
+  # discharged: `tile_n_limit` twelve lines below already derives itself from `mxu_column_size`,
+  # and `tile_m` is the one tile dimension that had no hardware term at all.
+  #
+  # jax reports mxu_column_size = 128 for v2..v5p and 256 for v6e / v7x / v8i
+  # (`jax._src.pallas.mosaic.tpu_info`: MXU_COLUMN_SIZE_GEN_LT_6 / _GE_6), so pre-v6 parts keep
+  # exactly the tile_m they get today and only the generations whose MXU tile really is 256 change.
+  #
+  # The dtype ratio is kept: `lhs_mod`/`rhs_mod` are each in {1, 2}, and dropping it would hand a
+  # low-bitwidth lhs a tile twice what the previous model intended.
+  bf16_bf16_tile_m = pltpu.get_tpu_info().mxu_column_size
   lhs_mod = min(pl.cdiv(16, lhs_bits), 2)
   rhs_mod = min(pl.cdiv(16, rhs_bits), 2)
-  tile_m = bf16_bf16_tile_m * lhs_mod // rhs_mod
+
+  # Two bounds on that target, both measured rather than assumed:
+  #
+  #  * CAPPED at twice the mean rows per group. `fill_metadata` emits
+  #    ceil((group_size + off) / tile_m) gm tiles PER GROUP, so the last gm tile of every expert is
+  #    partially filled and the padding grows with tile_m. Without the cap a 2048-expert config
+  #    (mean 32 rows) would process 8x the necessary rows -- twice as bad as the old 128. The
+  #    ceiling is 2x rather than 1x the mean because two swept shapes whose mean is exactly 128
+  #    still preferred the larger tile (by up to 1.64x on the transposed path), so a 1x ceiling
+  #    refused them for nothing. It is also why the target is not raised further: 4x is 4% faster
+  #    on a perfectly balanced router and 25-40% SLOWER on either ragged one.
+  #
+  #  * FLOORED at what this function returned before, so no shape and no hardware generation comes
+  #    out with a SMALLER tile_m -- and therefore slower -- than it does today. This matters for a
+  #    case that is easy to miss: `128 * lhs_mod // rhs_mod` already yields 256 for an 8-bit lhs
+  #    with a 16-bit rhs, so raising the constant alone would take that combination to 512, i.e.
+  #    straight into the regression above. The cap handles that; the floor guarantees the other
+  #    direction.
+  legacy_tile_m = 128 * lhs_mod // rhs_mod
+  mean_rows_per_group = dims.size_m // max(dims.size_group, 1)
+  tile_m = min(
+      bf16_bf16_tile_m * lhs_mod // rhs_mod,
+      max(legacy_tile_m, 2 * mean_rows_per_group),
+  )
   tile_m = min(tile_m, dims.size_m)
 
   # To avoid stalling MXU, we add some buffer room where tile_n cannot go
@@ -1048,10 +1078,16 @@ def calculate_tiling(
   tile_k = align_to(dims.size_k, num_lanes)
   tile_n = align_to(size_n_per_rhs, num_lanes)
 
-  def _gmm_vmem_estimate(tn: int, tk: int) -> int:
+  def _gmm_vmem_estimate(tn: int, tk: int, tm: int | None = None) -> int:
+    # `tm` defaults to the enclosing `tile_m` (late-bound, so it follows any
+    # later reassignment). It is only passed explicitly by the transpose_rhs
+    # tile_m search below, which has to price a tile_m it has not adopted yet.
+    if tm is None:
+      tm = tile_m
+
     # 1. LHS tile (double-buffered)
     lhs_tile_bytes = lhs_bits // 8
-    lhs_vmem = 2 * tile_m * tk * lhs_tile_bytes
+    lhs_vmem = 2 * tm * tk * lhs_tile_bytes
 
     # 2. RHS tile (triple-buffered, includes scale and bias if present)
     # If fuse_act is enabled, we have both gate and up weights,
@@ -1071,13 +1107,25 @@ def calculate_tiling(
     # 3. Accumulator
     acc_cols = fuse_act_factor * tn
     acc_dtype_bytes = 2 if lhs_cfgs.quant_dtype is not None else 4
-    acc_vmem = tile_m * acc_cols * acc_dtype_bytes
+    acc_vmem = tm * acc_cols * acc_dtype_bytes
 
     # 4. Output tile (double-buffered)
     out_dtype_bytes = jax.dtypes.itemsize_bits(lhs_cfgs.dtype) // 8
-    out_vmem = 2 * tile_m * tn * out_dtype_bytes
+    out_vmem = 2 * tm * tn * out_dtype_bytes
 
     return lhs_vmem + rhs_vmem + acc_vmem + out_vmem
+
+  # The VMEM safety net for the tile_m chosen above. The shrink loop below gives ground on tile_n
+  # and then, as a last resort, on tile_k -- but a tile_k split adds cross-tile accumulation, which
+  # is measured to lose in every cell (+60% at tile_m=128, +17% at 256, +6% at 512). So if the
+  # target tile_m cannot fit even at the NARROWEST tile_n the loop may settle on, fall back to the
+  # previous value rather than buying tile_m with a tile_k split. Priced at `tile_n_limit` rather
+  # than at full width on purpose: giving up tile_n to buy tile_m is measured to be worth it, so
+  # this must not refuse a tile_m that would fit once tile_n narrows.
+  #
+  if tile_m > legacy_tile_m:
+    if _gmm_vmem_estimate(tile_n_limit, tile_k, tile_m) > vmem_limit_bytes:
+      tile_m = legacy_tile_m
 
   # Multiple k tiles will introduce accumulation overhead. Thus, we first try
   # to fit the tensors into vmem by only adjusting tile_n.

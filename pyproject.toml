@@ -15,14 +15,14 @@ authors = [
 
 description = "A Pallas Custom Kernel Library."
 readme = "README.md"
-version = "0.0.10"
+version = "0.0.10.1"
 license = {file = "LICENSE"}
 requires-python = ">=3.11"
 dependencies = [
     "absl-py>=2.3.0",
     "einshape",
-    "jax>=0.8.2",
-    "jaxlib>=0.8.2",
+    "jax>=0.8.3",
+    "jaxlib>=0.8.3",
     "jaxtyping>=0.3",
     "pydantic>=2.11.0",
     "qwix>=0.1.2",
@@ -58,12 +58,12 @@ bench = [
 ]
 
 cuda = [
-    "jax[cuda12]>=0.8.0",
+    "jax[cuda12]>=0.8.3",
     "nvidia-cudnn-cu12>=9.0.0",
 ]
 
 tpu = [
-    "jax[tpu]>=0.8.0",
+    "jax[tpu]>=0.8.3",
     "hypothesis",
 ]
 

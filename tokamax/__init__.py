@@ -36,6 +36,21 @@ if not hasattr(_jax_sharding, "ManualAxisType"):
 
   _jax_sharding.ManualAxisType = ManualAxisType
 
+# pltpu.TensorCoreMesh is the only Pallas symbol the gmm_v2/tgmm_v2 kernels use that jax 0.8.3
+# does not export (checked: 1 of the 21 they reference). It is a rename, not a missing feature --
+# jax._src.pallas.mosaic.core.TensorCoreMesh exists in 0.8.3, but its constructor takes
+# (devices, axis_names) while jax>=0.11 is called as TensorCoreMesh(axis_name=...). 0.8.3's
+# create_tensorcore_mesh(axis_name) does exactly that derivation and returns the real class, so
+# this forwards to it rather than stubbing anything out.
+import jax.experimental.pallas.tpu as _pltpu
+
+if not hasattr(_pltpu, "TensorCoreMesh"):
+
+  def _tensorcore_mesh(axis_name, **kwargs):
+    return _pltpu.create_tensorcore_mesh(axis_name, **kwargs)
+
+  _pltpu.TensorCoreMesh = _tensorcore_mesh
+
 # pylint: disable=g-importing-member,useless-import-alias
 from tokamax import autotuning as autotuning
 from tokamax import benchmarking as benchmarking

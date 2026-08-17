@@ -14,6 +14,28 @@
 # ==============================================================================
 """A library of accelerator kernels."""
 
+# TEST BRANCH ONLY -- jax 0.8.3 compatibility shim. DO NOT send upstream.
+#
+# Upstream targets jax>=0.11, which is where jax.sharding.ManualAxisType was added. _src/ops/
+# ragged_dot references it in 18 places, all but three as type annotations -- and none of those
+# modules use `from __future__ import annotations`, so the annotations are evaluated eagerly and
+# `import tokamax` dies at import time on jax 0.8.3 with
+# "AttributeError: module 'jax.sharding' has no attribute 'ManualAxisType'".
+#
+# Importing any submodule runs this __init__ first, so the shim has to live here: there is no way
+# to reach tokamax._src.ops.experimental.gmm_v2 without executing the eager chain below.
+import jax.sharding as _jax_sharding
+
+if not hasattr(_jax_sharding, "ManualAxisType"):
+
+  class ManualAxisType:
+    """Stand-in for the jax>=0.11 type; only ever used as an annotation on this branch."""
+
+    def __init__(self, **kwargs):
+      self.__dict__.update(kwargs)
+
+  _jax_sharding.ManualAxisType = ManualAxisType
+
 # pylint: disable=g-importing-member,useless-import-alias
 from tokamax import autotuning as autotuning
 from tokamax import benchmarking as benchmarking

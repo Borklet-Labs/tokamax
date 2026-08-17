@@ -51,6 +51,27 @@ if not hasattr(_pltpu, "TensorCoreMesh"):
 
   _pltpu.TensorCoreMesh = _tensorcore_mesh
 
+# jax>=0.11 renamed two pl.kernel parameters: out_shape -> out_type and
+# scratch_shapes -> scratch_types. The gmm_v2/tgmm_v2 kernels call the new spelling. Verified by
+# inspect.signature against a real jax 0.8.3 install that this is the ONLY remaining signature
+# mismatch -- BlockSpec, Buffered, CompilerParams, emit_pipeline, CostEstimate, SemaphoreType,
+# make_async_copy and with_memory_space_constraint all accept what the call sites pass.
+import inspect as _inspect
+
+import jax.experimental.pallas as _pl
+
+if "out_type" not in _inspect.signature(_pl.kernel).parameters:
+  _orig_kernel = _pl.kernel
+
+  def _kernel(*args, out_type=None, scratch_types=None, **kwargs):
+    if out_type is not None:
+      kwargs["out_shape"] = out_type
+    if scratch_types is not None:
+      kwargs["scratch_shapes"] = scratch_types
+    return _orig_kernel(*args, **kwargs)
+
+  _pl.kernel = _kernel
+
 # pylint: disable=g-importing-member,useless-import-alias
 from tokamax import autotuning as autotuning
 from tokamax import benchmarking as benchmarking

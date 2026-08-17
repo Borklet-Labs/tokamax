@@ -20,8 +20,10 @@ requires-python = ">=3.12"
 dependencies = [
     "absl-py>=2.3.0",
     "einshape",
-    "jax>=0.11.0",
-    "jaxlib>=0.11.0",
+    # TEST BRANCH ONLY -- relaxed from >=0.11.0 so this branch installs into a jax 0.8.3
+    # environment for an end-to-end sanity check. DO NOT send this change upstream.
+    "jax>=0.8.3",
+    "jaxlib>=0.8.3",
     "jaxtyping>=0.3",
     "pydantic>=2.11.0",
     "qwix>=0.1.2",
@@ -71,7 +73,8 @@ cuda = [
 ]
 
 tpu = [
-    "jax[tpu]>=0.11.0",
+    # TEST BRANCH ONLY -- see the note on the core jax pin above.
+    "jax[tpu]>=0.8.3",
 ]
 
 [tool.pytest.ini_options]
